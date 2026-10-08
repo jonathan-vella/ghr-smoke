@@ -12,7 +12,7 @@ and **do not merge** until separately reviewed. No runtime has been performed.
 The hosted validation job checks the owner actor, exact repository/main workflow
 ref, immutable reviewed commit (both workflow SHA and job SHA), original
 32-lowercase-hex envelope, ordinal `1` or `2`, exact label, isolated resource
-group expectation, and approved public NAT IPv4 before a worker is queued.
+group expectation before a worker is queued.
 The agreed custom-only label is
 `ghr-smoke-vmss-spike-<32-lowercase-hex-envelope>-<ordinal>`.
 There are no actions, checkout, secrets, GitHub OIDC requests, or requested
@@ -34,13 +34,18 @@ tools and spike posture checks. The hook environment is never overridden and
 the hook itself is never manually invoked as proof.
 
 Additional checks use a bounded management-audience IMDS token probe with its
-response body discarded, approved GitHub HTTPS reachability, and exact NAT IPv4
-from `https://api.ipify.org`. Approve this outbound IP service before dispatch.
+response body discarded and GitHub HTTPS reachability. No third-party IP echo
+service is called or accepted as NAT evidence.
 A rejected/unreachable IMDS endpoint is limited evidence, NOT proof about every
 audience, alternate identity endpoint, or Azure configuration. An external
 observer must prove no VM identity attached. Resource-group output is explicitly
 an expectation, not cloud-resource attestation. No credentials or environment
 dumps are printed. No private PaaS target/access is invented.
+
+NAT evidence belongs to the external ARM observer: read back subnet/NIC
+`defaultOutboundAccess=false`, no worker NIC public IP, and the attached NAT,
+then correlate with successful worker GitHub connectivity and job completion.
+The worker does not query ARM or locally claim those settings are proven.
 
 ### Unresolved execution gates
 
@@ -71,7 +76,7 @@ With Python 3.9+ and Bash available, install the pinned YAML test parser via
 run `python -m unittest discover -s tests -v`.
 Fixtures execute the hosted input validator against allow/reject contexts,
 parse the YAML job/input graph, check static policy boundaries, run `bash -n`
-on inline shell blocks, and test
-probe exit/status and NAT matching using shell-function curl stubs. They
+on inline shell blocks, assert only IMDS/GitHub network targets, and test
+probe exit/status and GitHub connectivity using shell-function curl stubs. They
 perform no dispatch, cloud calls, token probes, or runtime assertions. They are
 not an Actions expression evaluator or proof of queue matching.

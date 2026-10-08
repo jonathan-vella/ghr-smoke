@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -44,7 +45,6 @@ class DispatchContract(unittest.TestCase):
             "ENVELOPE": "b" * 32,
             "ORDINAL": "1",
             "SPIKE_LABEL": "ghr-smoke-vmss-spike-" + "b" * 32 + "-1",
-            "EXPECTED_NAT_IPV4": "8.8.8.8",
             "EXPECTED_RESOURCE_GROUP": "rg-ghrunners-spike-vmss-swc",
         }
 
@@ -80,8 +80,6 @@ class DispatchContract(unittest.TestCase):
             "ENVELOPE": ["B" * 32, "", "b" * 31, "b" * 32 + "\n"],
             "ORDINAL": ["0", "3", "01", "1\n"],
             "SPIKE_LABEL": ["self-hosted", "ghr-smoke-vmss-spike-" + "b" * 32, "x\nlabel=self-hosted"],
-            "EXPECTED_NAT_IPV4": ["127.0.0.1", "10.0.0.1", "::1", "", "8.8.8.8\n",
-                                  "224.0.0.1", "255.255.255.255"],
             "EXPECTED_RESOURCE_GROUP": ["production", ""],
         }
         for key, values in invalid.items():
@@ -129,8 +127,7 @@ class DispatchContract(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {})
         inputs = workflow["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(set(inputs), {"envelope", "ordinal", "spike_label",
-                                      "reviewed_commit", "expected_nat_ipv4",
-                                      "expected_resource_group"})
+                                      "reviewed_commit", "expected_resource_group"})
         for name, config in inputs.items():
             self.assertEqual(config["required"], "true")
             self.assertNotIn("default", config)
@@ -186,33 +183,42 @@ class DispatchContract(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, accepted, result.stderr.decode("utf-8"))
                 self.assertEqual(result.stdout, b"")
 
-    def test_outbound_and_nat_fail_closed_without_network(self):
+    def test_github_connectivity_fail_closed_without_network(self):
         worker = shell_blocks()[1]
         checks = "for target in " + worker.split("for target in ", 1)[1].split(
             "printf 'Nonsecret smoke", 1)[0]
-        for github, nat, exit_code, accepted in (
-            ("200", "8.8.8.8", 0, True), ("403", "8.8.8.8", 0, False),
-            ("200", "1.1.1.1", 0, False), ("200", "", 28, False),
-            ("200", "unexpected-body", 0, False),
+        for github, exit_code, accepted in (
+            ("200", 0, True), ("403", 0, False), ("301", 0, False),
+            ("500", 0, False), ("000", 28, False), ("200", 7, False),
         ):
-            with self.subTest(github=github, nat=nat, exit_code=exit_code):
+            with self.subTest(github=github, exit_code=exit_code):
                 script = (
-                    "set -euo pipefail\nEXPECTED_NAT_IPV4=8.8.8.8\n"
+                    "set -euo pipefail\n"
                     "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }\n"
                     "curl() {\n"
                     "  [[ \" $* \" == *' --max-time 10 '* ]] || return 99\n"
                     "  [[ \" $* \" == *\" --proto =https \"* ]] || return 99\n"
-                    "  if [[ \" $* \" == *' https://api.ipify.org '* ]]; then\n"
-                    f"    printf '%s' '{nat}'; return {exit_code}\n"
-                    "  else\n"
-                    "    [[ \" $* \" == *' --output /dev/null '* ]] || return 99\n"
-                    f"    printf '%s' '{github}'; return 0\n"
-                    "  fi\n}\n" + checks
+                    "  [[ \" $* \" == *' --output /dev/null '* ]] || return 99\n"
+                    "  [[ \" $* \" == *' https://github.com '* || "
+                    "\" $* \" == *' https://api.github.com '* ]] || return 99\n"
+                    f"  printf '%s' '{github}'; return {exit_code}\n"
+                    "}\n" + checks
                 )
                 result = subprocess.run(["bash"], input=script.encode("utf-8"),
                                         capture_output=True, check=False)
                 self.assertEqual(result.returncode == 0, accepted, result.stderr.decode("utf-8"))
                 self.assertEqual(result.stdout, b"")
+
+    def test_worker_network_targets_are_only_imds_and_github(self):
+        worker = shell_blocks()[1]
+        self.assertEqual(set(re.findall(r"https?://[^\s'\";]+", worker)), {
+            "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F",
+            "https://github.com",
+            "https://api.github.com",
+        })
+        self.assertEqual(worker.count("$(curl "), 2)
+        self.assertIsNone(re.search(r"\bnat\b", TEXT, re.IGNORECASE))
+        self.assertNotIn("expected_nat_ipv4", TEXT)
 
 
 if __name__ == "__main__":
