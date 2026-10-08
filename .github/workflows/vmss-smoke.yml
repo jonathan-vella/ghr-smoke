@@ -1,0 +1,157 @@
+name: Gated VMSS smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      envelope:
+        description: Reviewed original envelope nonce (32 lowercase hex)
+        required: true
+        type: string
+      ordinal:
+        description: Reserved FULL run ordinal within the original envelope
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+      spike_label:
+        description: Exact reviewed controller scale-set label
+        required: true
+        type: string
+      reviewed_commit:
+        description: Owner-approved immutable main smoke commit (40 lowercase hex)
+        required: true
+        type: string
+      expected_nat_ipv4:
+        description: Approved NAT public IPv4 (no discovery or default)
+        required: true
+        type: string
+      expected_resource_group:
+        description: Reviewed isolated resource group
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: vmss-smoke-${{ inputs.envelope }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.actor == 'jonathan-vella' && github.repository == 'jonathan-vella/ghr-smoke' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      label: ${{ steps.contract.outputs.label }}
+    steps:
+      - name: Validate reviewed dispatch contract before queueing worker
+        id: contract
+        shell: bash
+        env:
+          ENVELOPE: ${{ inputs.envelope }}
+          ORDINAL: ${{ inputs.ordinal }}
+          SPIKE_LABEL: ${{ inputs.spike_label }}
+          REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
+          EXPECTED_NAT_IPV4: ${{ inputs.expected_nat_ipv4 }}
+          EXPECTED_RESOURCE_GROUP: ${{ inputs.expected_resource_group }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import re
+
+          def require(condition):
+              if not condition:
+                  raise SystemExit("Invalid reviewed smoke contract.")
+
+          e = os.environ
+          require(e["GITHUB_ACTOR"] == "jonathan-vella")
+          require(e["GITHUB_REPOSITORY"] == "jonathan-vella/ghr-smoke")
+          require(e["GITHUB_EVENT_NAME"] == "workflow_dispatch")
+          require(e["GITHUB_RUN_ATTEMPT"] == "1")
+          require(e["GITHUB_REF"] == "refs/heads/main")
+          require(e["GITHUB_WORKFLOW_REF"] == "jonathan-vella/ghr-smoke/.github/workflows/vmss-smoke.yml@refs/heads/main")
+          require(re.fullmatch(r"[0-9a-f]{32}", e["ENVELOPE"]) is not None)
+          require(e["ORDINAL"] in ("1", "2"))
+          label = "ghr-smoke-vmss-spike-" + e["ENVELOPE"] + "-" + e["ORDINAL"]
+          require(e["SPIKE_LABEL"] == label)
+          require(re.fullmatch(r"[0-9a-f]{40}", e["REVIEWED_COMMIT"]) is not None)
+          require(e["GITHUB_SHA"] == e["GITHUB_WORKFLOW_SHA"] == e["REVIEWED_COMMIT"])
+          require(e["EXPECTED_RESOURCE_GROUP"] == "rg-ghrunners-spike-vmss-swc")
+          try:
+              ip = ipaddress.IPv4Address(e["EXPECTED_NAT_IPV4"])
+          except ipaddress.AddressValueError:
+              raise SystemExit("Invalid approved NAT IPv4.") from None
+          require(ip.is_global and not ip.is_multicast and not ip.is_reserved
+                  and str(ip) == e["EXPECTED_NAT_IPV4"])
+          with open(e["GITHUB_OUTPUT"], "a", encoding="ascii") as output:
+              output.write("label=" + label + "\n")
+          PY
+
+  smoke:
+    needs: validate
+    if: github.actor == 'jonathan-vella' && github.repository == 'jonathan-vella/ghr-smoke' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ${{ needs.validate.outputs.label }}
+    timeout-minutes: 15
+    steps:
+      - name: Nonsecret worker assertions
+        shell: bash
+        env:
+          ENVELOPE: ${{ inputs.envelope }}
+          ORDINAL: ${{ inputs.ordinal }}
+          SPIKE_LABEL: ${{ needs.validate.outputs.label }}
+          REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
+          EXPECTED_NAT_IPV4: ${{ inputs.expected_nat_ipv4 }}
+          EXPECTED_RESOURCE_GROUP: ${{ inputs.expected_resource_group }}
+          AZURE_CORE_COLLECT_TELEMETRY: 'false'
+          AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
+          AZURE_BICEP_USE_BINARY_FROM_PATH: 'true'
+          POWERSHELL_TELEMETRY_OPTOUT: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: |
+          set -euo pipefail
+          fail() { printf '::error::%s\n' "$1" >&2; exit 1; }
+          [[ $GITHUB_RUN_ATTEMPT == 1 ]] || fail 'Workflow reruns are forbidden.'
+          [[ $GITHUB_SHA == "$REVIEWED_COMMIT" && $GITHUB_WORKFLOW_SHA == "$REVIEWED_COMMIT" ]] || fail 'Commit pin mismatch.'
+          [[ $SPIKE_LABEL == "ghr-smoke-vmss-spike-${ENVELOPE}-${ORDINAL}" ]] || fail 'Label mismatch.'
+          [[ $(id -un) == runner && $(id -u) == 1001 && $(id -g) == 1001 ]] || fail 'Unexpected worker identity.'
+          ! command -v sudo >/dev/null 2>&1 || fail 'sudo executable must be absent.'
+          ! command -v dockerd >/dev/null 2>&1 || fail 'Docker daemon must be absent.'
+          [[ ! -e /var/run/docker.sock && ! -e /run/docker.sock ]] || fail 'Docker socket must be absent.'
+          [[ ${ACTIONS_RUNNER_HOOK_JOB_STARTED:-} == /opt/ghr-vmss/pre-job-spike.sh ]] || fail 'Spike hook mismatch.'
+          for file in /opt/ghr-vmss/verify-spike-worker.sh /opt/runner-image/versions.json /opt/ghr-vmss/pre-job-spike.sh /opt/ghr-vmss/pre-job-spike.py /opt/runner-image/pre-job-policy.sh /opt/runner-image/pre-job-policy.py; do
+            [[ -f $file && ! -L $file && ! -w $file ]] || fail 'Image contract file must be immutable.'
+            [[ $(stat -c '%u:%g' "$file") == 0:0 ]] || fail 'Image contract file must be rootowned.'
+            if [[ $file == */versions.json ]]; then
+              [[ $(stat -c %a "$file") == 444 ]] || fail 'Manifest mode mismatch.'
+            else
+              [[ $(stat -c %a "$file") == 555 ]] || fail 'Verifier/hook mode mismatch.'
+            fi
+          done
+          [[ ! -w /opt/runner-image && ! -w /opt/ghr-vmss ]] || fail 'Contract directories must be immutable.'
+          # The verifier observes the actual spike hook; never override its environment.
+          /bin/bash /opt/ghr-vmss/verify-spike-worker.sh
+          # Discard all token response bodies, including on an unexpected success.
+          set +e
+          imds_status=$(curl --disable --silent --noproxy '*' --connect-timeout 2 --max-time 5 \
+            --output /dev/null --write-out '%{http_code}' --header 'Metadata: true' \
+            'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' 2>/dev/null)
+          imds_exit=$?
+          set -e
+          if [[ $imds_exit == 0 ]]; then
+            [[ $imds_status == 400 || $imds_status == 404 ]] || fail 'Identity endpoint did not reject token request.'
+          else
+            [[ $imds_exit == 7 || $imds_exit == 28 ]] || fail 'Unexpected identity probe failure.'
+            [[ $imds_status == 000 ]] || fail 'Ambiguous identity probe response.'
+          fi
+          for target in https://github.com https://api.github.com; do
+            status=$(curl --disable --silent --show-error --proto '=https' --tlsv1.2 --noproxy '*' \
+              --connect-timeout 5 --max-time 10 --output /dev/null --write-out '%{http_code}' "$target")
+            [[ $status == 200 ]] || fail 'Approved outbound endpoint check failed.'
+          done
+          nat=$(curl --disable --silent --show-error --fail --proto '=https' --tlsv1.2 --noproxy '*' \
+            --connect-timeout 5 --max-time 10 --max-filesize 64 https://api.ipify.org)
+          [[ $nat == "$EXPECTED_NAT_IPV4" ]] || fail 'Approved NAT IPv4 mismatch.'
+          printf 'Nonsecret smoke assertions passed: uid=1001 gid=1001 label=%s github-run-id=%s resource-group-expectation=%s\n' "$SPIKE_LABEL" "$GITHUB_RUN_ID" "$EXPECTED_RESOURCE_GROUP"
