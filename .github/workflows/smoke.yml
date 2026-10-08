@@ -1,12 +1,16 @@
 name: smoke
 on: workflow_dispatch
-permissions: {}
+permissions:
+  id-token: write
 jobs:
   smoke:
     runs-on: ghr-smoke
+    environment: smoke
     timeout-minutes: 15
     env:
       ACCOUNT: ${{ vars.SMOKE_STORAGE_ACCOUNT }}
+      AZURE_CLIENT_ID: ${{ vars.SMOKE_AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.SMOKE_AZURE_TENANT_ID }}
     steps:
       - name: Blob endpoint resolves to the consumer private endpoint subnet
         run: |
@@ -14,13 +18,15 @@ jobs:
           host="$ACCOUNT.blob.core.windows.net"
           ip="$(getent hosts "$host" | awk '{print $1}' | head -n1)"
           echo "$host -> $ip"
-          case "$ip" in 10.60.0.1[2-9][0-9]|10.60.0.[0-9]*) ;; *) echo "::error::not a private 10.60.0.x address"; exit 1 ;; esac
-      - name: List private container through the private endpoint
-        run: |
-          set -euo pipefail
-          code="$(curl -sS -o body.xml -w '%{http_code}' "https://$ACCOUNT.blob.core.windows.net/smoke?restype=container&comp=list")"
-          echo "HTTP $code"; head -c 400 body.xml; echo
-          test "$code" = 200
-          grep -q '<EnumerationResults' body.xml
+          case "$ip" in 10.60.0.*) ;; *) echo "::error::not a private 10.60.0.x address"; exit 1 ;; esac
       - name: No managed identity in the runner container
         run: test -z "${IDENTITY_ENDPOINT:-}" && test -z "${IDENTITY_HEADER:-}"
+      - name: Azure login with GitHub OIDC
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)"
+          az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+            --federated-token "$token" --allow-no-subscriptions -o none
+      - name: List private container through the private endpoint
+        run: az storage blob list --account-name "$ACCOUNT" --container-name smoke --auth-mode login -o table
