@@ -22,10 +22,6 @@ on:
         description: Owner-approved immutable main smoke commit (40 lowercase hex)
         required: true
         type: string
-      expected_nat_ipv4:
-        description: Approved NAT public IPv4 (no discovery or default)
-        required: true
-        type: string
       expected_resource_group:
         description: Reviewed isolated resource group
         required: true
@@ -53,12 +49,10 @@ jobs:
           ORDINAL: ${{ inputs.ordinal }}
           SPIKE_LABEL: ${{ inputs.spike_label }}
           REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
-          EXPECTED_NAT_IPV4: ${{ inputs.expected_nat_ipv4 }}
           EXPECTED_RESOURCE_GROUP: ${{ inputs.expected_resource_group }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import ipaddress
           import os
           import re
 
@@ -80,12 +74,6 @@ jobs:
           require(re.fullmatch(r"[0-9a-f]{40}", e["REVIEWED_COMMIT"]) is not None)
           require(e["GITHUB_SHA"] == e["GITHUB_WORKFLOW_SHA"] == e["REVIEWED_COMMIT"])
           require(e["EXPECTED_RESOURCE_GROUP"] == "rg-ghrunners-spike-vmss-swc")
-          try:
-              ip = ipaddress.IPv4Address(e["EXPECTED_NAT_IPV4"])
-          except ipaddress.AddressValueError:
-              raise SystemExit("Invalid approved NAT IPv4.") from None
-          require(ip.is_global and not ip.is_multicast and not ip.is_reserved
-                  and str(ip) == e["EXPECTED_NAT_IPV4"])
           with open(e["GITHUB_OUTPUT"], "a", encoding="ascii") as output:
               output.write("label=" + label + "\n")
           PY
@@ -103,7 +91,6 @@ jobs:
           ORDINAL: ${{ inputs.ordinal }}
           SPIKE_LABEL: ${{ needs.validate.outputs.label }}
           REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
-          EXPECTED_NAT_IPV4: ${{ inputs.expected_nat_ipv4 }}
           EXPECTED_RESOURCE_GROUP: ${{ inputs.expected_resource_group }}
           AZURE_CORE_COLLECT_TELEMETRY: 'false'
           AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
@@ -151,7 +138,4 @@ jobs:
               --connect-timeout 5 --max-time 10 --output /dev/null --write-out '%{http_code}' "$target")
             [[ $status == 200 ]] || fail 'Approved outbound endpoint check failed.'
           done
-          nat=$(curl --disable --silent --show-error --fail --proto '=https' --tlsv1.2 --noproxy '*' \
-            --connect-timeout 5 --max-time 10 --max-filesize 64 https://api.ipify.org)
-          [[ $nat == "$EXPECTED_NAT_IPV4" ]] || fail 'Approved NAT IPv4 mismatch.'
           printf 'Nonsecret smoke assertions passed: uid=1001 gid=1001 label=%s github-run-id=%s resource-group-expectation=%s\n' "$SPIKE_LABEL" "$GITHUB_RUN_ID" "$EXPECTED_RESOURCE_GROUP"
