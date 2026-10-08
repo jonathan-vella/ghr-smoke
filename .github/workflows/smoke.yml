@@ -1,0 +1,26 @@
+name: smoke
+on: workflow_dispatch
+permissions: {}
+jobs:
+  smoke:
+    runs-on: ghr-smoke
+    timeout-minutes: 15
+    env:
+      ACCOUNT: ${{ vars.SMOKE_STORAGE_ACCOUNT }}
+    steps:
+      - name: Blob endpoint resolves to the consumer private endpoint subnet
+        run: |
+          set -euo pipefail
+          host="$ACCOUNT.blob.core.windows.net"
+          ip="$(getent hosts "$host" | awk '{print $1}' | head -n1)"
+          echo "$host -> $ip"
+          case "$ip" in 10.60.0.1[2-9][0-9]|10.60.0.[0-9]*) ;; *) echo "::error::not a private 10.60.0.x address"; exit 1 ;; esac
+      - name: List private container through the private endpoint
+        run: |
+          set -euo pipefail
+          code="$(curl -sS -o body.xml -w '%{http_code}' "https://$ACCOUNT.blob.core.windows.net/smoke?restype=container&comp=list")"
+          echo "HTTP $code"; head -c 400 body.xml; echo
+          test "$code" = 200
+          grep -q '<EnumerationResults' body.xml
+      - name: No managed identity in the runner container
+        run: test -z "${IDENTITY_ENDPOINT:-}" && test -z "${IDENTITY_HEADER:-}"
