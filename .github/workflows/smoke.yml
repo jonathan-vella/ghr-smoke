@@ -19,8 +19,17 @@ jobs:
           ip="$(getent hosts "$host" | awk '{print $1}' | head -n1)"
           echo "$host -> $ip"
           case "$ip" in 10.60.0.*) ;; *) echo "::error::not a private 10.60.0.x address"; exit 1 ;; esac
-      - name: No managed identity in the runner container
-        run: test -z "${IDENTITY_ENDPOINT:-}" && test -z "${IDENTITY_HEADER:-}"
+      - name: No usable managed identity in the runner container
+        run: |
+          set -u
+          for v in IDENTITY_ENDPOINT IDENTITY_HEADER MSI_ENDPOINT MSI_SECRET AZURE_CLIENT_ID; do
+            if [ -n "${!v:-}" ]; then echo "$v is SET"; else echo "$v is unset"; fi
+          done
+          if [ -n "${IDENTITY_ENDPOINT:-}" ]; then
+            code="$(curl -sS -o /dev/null -m 10 -w '%{http_code}' -H "X-IDENTITY-HEADER: ${IDENTITY_HEADER:-}" "${IDENTITY_ENDPOINT}?resource=https://management.azure.com/&api-version=2019-08-01" || true)"
+            echo "token request HTTP status: ${code}"
+            test "${code}" != "200"
+          fi
       - name: Azure login with GitHub OIDC
         run: |
           set -euo pipefail
