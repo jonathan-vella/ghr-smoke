@@ -1,0 +1,15 @@
+name: negative-push
+on:
+  push:
+    branches: [negative/push]
+permissions:
+  contents: read
+jobs:
+  must-be-rejected:
+    runs-on: ghr-smoke
+    timeout-minutes: 10
+    steps:
+      - name: Canary (must never run)
+        run: |
+          echo "CANARY-USER-STEP-RAN"
+          exit 1
