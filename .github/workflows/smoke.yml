@@ -22,13 +22,15 @@ jobs:
       - name: No usable managed identity in the runner container
         run: |
           set -u
-          for v in IDENTITY_ENDPOINT IDENTITY_HEADER MSI_ENDPOINT MSI_SECRET AZURE_CLIENT_ID; do
+          for v in IDENTITY_ENDPOINT IDENTITY_HEADER MSI_ENDPOINT MSI_SECRET; do
             if [ -n "${!v:-}" ]; then echo "$v is SET"; else echo "$v is unset"; fi
           done
           if [ -n "${IDENTITY_ENDPOINT:-}" ]; then
-            code="$(curl -sS -o /dev/null -m 10 -w '%{http_code}' -H "X-IDENTITY-HEADER: ${IDENTITY_HEADER:-}" "${IDENTITY_ENDPOINT}?resource=https://management.azure.com/&api-version=2019-08-01" || true)"
-            echo "token request HTTP status: ${code}"
-            test "${code}" != "200"
+            for q in "" "&client_id=d0aec9dc-41bf-4814-b06e-4bf87f000d31"; do
+              code="$(curl -sS -o /dev/null -m 10 -w '%{http_code}' -H "X-IDENTITY-HEADER: ${IDENTITY_HEADER:-}" "${IDENTITY_ENDPOINT}?resource=https://management.azure.com/&api-version=2019-08-01${q}" || true)"
+              echo "token request (${q:-system-assigned}) HTTP status: ${code}"
+              test "${code}" != "200"
+            done
           fi
       - name: Azure login with GitHub OIDC
         run: |
